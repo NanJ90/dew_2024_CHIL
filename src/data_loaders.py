@@ -1,4 +1,6 @@
+from collections import namedtuple
 from collections.abc import Sequence
+from enum import Enum
 from itertools import product
 import sys
 from typing import Callable, Iterable, Union
@@ -41,6 +43,12 @@ def label_encoded_data(data, ignore_columns):
                 print(labels)
 
     return data
+
+
+CustomExperimentDataObject = namedtuple(
+    'CustomExperimentDataObject',
+    ['data', 'dataset_name', 'target_col']
+)
 
 
 class MedicalDataset(Sequence):
@@ -118,7 +126,11 @@ class MedicalDataset(Sequence):
         
         self.test_features = test_features
         
-        self.base_features = [c for c in self.data.columns if c not in test_features + [self.target_col]]
+        self.base_features = [
+            c 
+            for c in self.data.columns 
+            if c not in test_features + [self.target_col]
+        ]
 
     def __len__(self):
         return len(self.data)
@@ -269,7 +281,6 @@ class MissDataset(Sequence):
         X = data.drop(columns=[self.target_col])
         X_cols = X.columns
         X_index = X.index
-        print(X)
         miss_dict = produce_NA(
             X=X,
             p_miss=p_miss, 
@@ -280,7 +291,6 @@ class MissDataset(Sequence):
 
         self.data = pd.DataFrame(X, columns=X_cols, index=X_index)
         self.data[self.target_col] = self.targets
-        print(self.data)
         
         folder_ = StratifiedKFold(
             n_splits=n_folds,
@@ -606,3 +616,42 @@ def normality_test_wisconsin():
     for i in df.columns:
         t = stats.normaltest(df[i])
         print(t)
+
+
+class DataLoadersEnum(Enum):
+
+    def prepare_eeg_eye_data(
+        path_to_eeg_data: str = '../data/eeg_eye_state.csv'
+    ) -> CustomExperimentDataObject:
+        df = pd.read_csv(path_to_eeg_data, header=None)
+        df.columns = [str(c) for c in df.columns]
+        target_col = df.columns[-1]
+        return CustomExperimentDataObject(
+            data=df, 
+            dataset_name='eeg_eye_state', 
+            target_col=target_col
+        )
+
+    def prepare_cleveland_heart_data(
+        path_to_data: str = '../data/heart_cleveland_upload.csv'
+    ) -> CustomExperimentDataObject:
+        df = pd.read_csv(path_to_data)
+        target_col = 'condition'
+        dataset_name = 'cleveland_heart_disease'
+        return CustomExperimentDataObject(
+            data=df,
+            dataset_name=dataset_name,
+            target_col=target_col
+        )
+
+    def prepare_diabetic_retinopathy_dataset(
+        path_to_data: str = '../data/diabetic_retinopathy_dataset.csv'
+    ) -> CustomExperimentDataObject:
+        df = pd.read_csv(path_to_data, header=None)
+        df.columns = [str(c) for c in df.columns]
+        target_col = df.columns[-1]
+        return CustomExperimentDataObject(
+            data=df, 
+            dataset_name='diabetic_retinopathy', 
+            target_col=target_col
+        )
