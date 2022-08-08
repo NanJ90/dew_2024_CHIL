@@ -14,7 +14,7 @@ import pandas as pd
 from scipy import stats
 import sklearn
 from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 
 
 sys.path.append('.')
@@ -281,6 +281,8 @@ class MissDataset(Sequence):
         X = data.drop(columns=[self.target_col])
         X_cols = X.columns
         X_index = X.index
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        X = scaler.fit_transform(X)
         miss_dict = produce_NA(
             X=X,
             p_miss=p_miss, 

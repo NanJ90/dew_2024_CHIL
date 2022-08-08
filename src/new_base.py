@@ -417,7 +417,13 @@ class ClassifierWithImputation(BaseEstimator, ClassifierMixin):
         self.estimator_is_fitted = True
         if use_optimal_threshold:
             self.set_optimal_threshold(X, y)
-        self.classes = list(set(y))
+        if isinstance(y, list):
+            self.classes = list(set(y))
+        elif isinstance(y, np.ndarray):
+            if len(y.shape) > 1:
+                self.classes = np.eye(y.shape[1])
+            else:
+                self.classes = np.unique(y)
 
     @property
     def classes_(self):
@@ -446,6 +452,9 @@ class ClassifierWithImputation(BaseEstimator, ClassifierMixin):
             predictions = getattr(self.estimator, self.prediction_method)(
                 X_imputed
             )
+        
+        if isinstance(predictions, list): # random forest
+            predictions = predictions[-1]
 
         return predictions
 
