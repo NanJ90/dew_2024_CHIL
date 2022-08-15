@@ -54,6 +54,7 @@ from new_base import BaseInheritanceClassifier, BaseNonmissingSubspaceClassifier
 from data_loaders import Dataset, MedicalDataset, PlacentalAnalytesTests
 from data_loaders import load_numom2b_analytes_dataset
 from data_loaders import load_wisconsin_diagnosis_dataset, load_wisconsin_prognosis_dataset
+import diversity
 from utils import Test, get_n_tests_missing, label_encoded_data,\
     find_optimal_threshold, get_device, get_prediction_method, get_classification_metrics
 from utils import get_sample_indices_with_optional_tests, plot_prediction_errors
@@ -836,11 +837,219 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
             X = pd.DataFrame(X)
 
         self.train_samples = copy.deepcopy(X)
+        self.y_train = y
+        if len(self.y_train.shape) > 1:
+            self.y_train = pd.DataFrame(self.y_train).idxmax(axis=1)
+        val_set_hard_preds_df = pd.DataFrame()
+        self.diversity_df = pd.DataFrame()
 
         for clf_name, model in self.classifier_pool.items():
             probas = model.predict_proba(X)
-            # errors = np.max(np.clip(y - probas, 0, 1), axis=1)
-            errors = [log_loss(y[i, :], probas[i, :]) for i in range(len(y))]
+            if len(probas.shape) > 1:
+                val_set_hard_preds_df[clf_name] = pd.DataFrame(probas).idxmax(axis=1) # hard labels for diversity score
+            else:
+                val_set_hard_preds_df[clf_name] = np.round(probas).astype(int)
+            errors = np.max(np.clip(y - probas, 0, 1), axis=1)
+            # errors = [log_loss(y[i, :], probas[i, :]) for i in range(len(y))]
+            self.samplewise_clf_errors[clf_name] = errors
+
+        self.val_set_hard_preds_matrix = val_set_hard_preds_df.to_numpy()
+
+    def predict_proba_one_sample(
+        self, sample
+    ) -> Mapping[str, Mapping[Union[int, None], Iterable[float]]]:
+        predictions = {}
+        diversities_per_pipeline = {}
+        weights_dict = {}
+        query = np.array(sample).reshape(1,-1)
+        pipeline_specific_neighbor_indices: dict = self.get_nearest_neighbors(query, self.train_samples)
+        pipeline_competences: dict = self.estimate_competences(
+            pipeline_specific_neighbor_indices=pipeline_specific_neighbor_indices
+        )
+        full_competences = np.array(list(pipeline_competences.values())).astype(np.float32)
+        full_weights = scipy.special.softmax(full_competences)
+        
+        sample = sample.to_frame().T
+        
+        for top_n in self.n_top_to_choose:
+            
+            # top_n_pipeline_competences = {idx: pipeline_competences[idx] for idx in dict(top_n_clf).keys()}
+            # top_n_pipeline_specific_neighbor_indices = {
+            #     idx: pipeline_specific_neighbor_indices[idx]
+            #     for idx in dict(top_n_clf).keys()
+            # }
+            competences = copy.deepcopy(full_competences)
+            diversity_scores = []
+            y_true_per_pipeline = [
+                self.y_train[[i for i in pipeline_specific_neighbor_indices[pipeline_idx]]]
+                for pipeline_idx in pipeline_specific_neighbor_indices.keys()
+            ]
+            # for pipeline_idx, y_true in enumerate(y_true_per_pipeline):
+            #     prediction_matrix = self.val_set_hard_preds_matrix[
+            #         list(
+            #             list(pipeline_specific_neighbor_indices.values())[pipeline_idx]
+            #         )
+            #     ]
+                # if len(prediction_matrix.shape) == 1:
+                #     diversity_scores = [np.array([1], dtype=np.float32)]
+                #     break
+                # diversity_score = diversity.compute_pairwise_diversity(
+                #     targets=y_true_per_pipeline[pipeline_idx],
+                #     prediction_matrix=prediction_matrix,
+                #     diversity_func=diversity.correlation_coefficient
+                # )
+                # diversity_score = np.nan_to_num(diversity_score)
+                # diversity_score /= len(diversity_score)
+                # diversity_scores.append(diversity_score)
+            
+            # diversities = 1 - np.mean(np.vstack(diversity_scores), axis=0).astype(np.float32)
+            # diversities = np.nan_to_num(diversities, 1)
+
+            # competences *= diversities
+
+            competences = np.nan_to_num(competences)
+            if top_n not in [None, -1, 0]:
+                # rank from highest competence --> lowest_competence
+                ranked = np.argsort(competences)[::-1][0: top_n]
+                top_n_clf = [
+                    list(self.classifier_pool.items())[i] 
+                    for i in ranked
+                ]
+                top_n_clf_competences = np.array([
+                    competences[i]
+                    for i in ranked
+                ]).astype(np.float32)
+            else:
+                ranked = list(range(len(competences)))
+                top_n_clf = list(self.classifier_pool.items())
+                top_n_clf_competences = competences
+
+
+            weights = scipy.special.softmax(top_n_clf_competences)
+            weights_to_report = [0] * len(full_weights)
+            for i, clf_idx in enumerate(ranked):
+                weights_to_report[clf_idx] = weights[i]
+            weights_dict[top_n] = list(weights_to_report)
+            probas = np.array([
+                model.predict_proba(sample)[0]
+                for clf_name, model in top_n_clf
+            ])
+            # print(top_n_clf)
+            # print(weights)
+            # print(probas)
+            prediction = np.dot(weights, probas)
+            # print(prediction)
+            # print('=========')
+            predictions[top_n] = prediction
+
+        return {'predictions': predictions, 'weights': weights_dict}
+        
+
+    def predict_proba(self, X) -> Tuple[Mapping[Union[int, None], np.ndarray]]:
+        top_n_prediction_sets = {}
+
+        predictions = {top_n: [] for top_n in self.n_top_to_choose}
+        weights = {top_n: [] for top_n in self.n_top_to_choose}
+        all_samples = [X.iloc[i, :].astype(np.float32) for i in range(X.shape[0])]
+
+        with tqdm(total=len(all_samples)) as pbar:
+            with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+                for result in pool.map(self.predict_proba_one_sample, all_samples):
+                    for top_n in self.n_top_to_choose:
+                        predictions[top_n].append(result['predictions'][top_n])
+                        weights[top_n].append(result['weights'][top_n])
+                    pbar.update(1)
+
+        for top_n in predictions.keys():
+            predictions[top_n] = np.vstack(predictions[top_n])
+            weights[top_n] = np.vstack(weights[top_n])
+
+        return predictions, weights
+
+    def predict(self, X) -> dict:
+        predictions = {}
+        probas_sets = self.predict_proba(X)
+        for top_n, probas in probas_sets.items():
+            a = (probas == probas.max(axis=1, keepdims=True)).astype(int)
+            predictions[top_n] = a
+
+        return predictions
+
+    def get_nearest_neighbors(self, q, samples_df):
+        pipeline_specific_neighbor_indices = {}
+        for idx, p in self.classifier_pool.items():
+            imputed_q = p.imputer.transform(q).reshape(1,-1)
+            imputed_samples = p.imputer.transform(samples_df)
+            distances = cdist(imputed_q, imputed_samples)[0]
+            # we will use numerical indices simply for facilitating y_true indexing in competence esitmation
+            dist_df = pd.DataFrame(data=distances, columns=['distance'], index=range(len(samples_df)))
+            sorted_distances_df = dist_df.sort_values('distance')
+            pipeline_specific_neighbor_indices[idx] = sorted_distances_df.index[0: self.n_neighbors]
+
+        return pipeline_specific_neighbor_indices
+
+
+    def estimate_competences(self, q=None, samples_df=None, pipeline_specific_neighbor_indices=None) -> dict:
+        
+        pipeline_competences = {}
+        if pipeline_specific_neighbor_indices is None:
+            assert q is not None and samples_df is not None
+            pipeline_specific_neighbor_indices = self.get_nearest_neighbors(
+                q, samples_df
+            )
+        
+        for pipeline_idx, indices in pipeline_specific_neighbor_indices.items():
+            # predictions = pipelines[pipeline_idx].predict_proba(samples_df.loc[indices, :])
+            # errors = np.abs(predictions - y_true[indices])
+            errors = self.samplewise_clf_errors[pipeline_idx][indices]
+            competences = 1 - errors
+            competence = np.mean(competences)
+            competence = competence / (np.std(competences) + 0.01) if competence > self.competence_threshold else 0
+            pipeline_competences[pipeline_idx] = competence
+
+        return pipeline_competences
+
+
+    def get_pipeline_weights(self, q, samples_df) -> dict:
+        pipeline_weights = {}
+        pipeline_competences = self.estimate_competences(q, samples_df)
+        all_competence_scores = list(pipeline_competences.values())
+        weights = scipy.special.softmax(all_competence_scores)
+        for idx, pipeline_type in enumerate(list(pipeline_competences.keys())):
+            pipeline_weights[pipeline_type] = weights[idx]
+
+        return pipeline_weights
+
+
+
+class DEWClassifierClustering(BaseEstimator, ClassifierMixin):
+    def __init__(
+        self, 
+        classifier_pool:    Union[Mapping[str, BaseEstimator],\
+                            Iterable[Tuple[str, BaseEstimator]]],
+        n_clusters=5,
+        n_top_to_choose=[1,3,5,None],
+        competence_threshold = 0.5
+    ) -> None:
+        super().__init__()
+        self.classifier_pool = dict(classifier_pool)
+        self.n_top_to_choose=n_top_to_choose
+        self.n_neighbors = n_clusters
+        self.competence_threshold = competence_threshold
+        self.samplewise_clf_errors = pd.DataFrame({})
+        self.weight_assignments = pd.DataFrame({})
+        self._temp_weights = []
+
+    def fit(self, X, y):
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+
+        self.train_samples = copy.deepcopy(X)
+
+        for clf_name, model in self.classifier_pool.items():
+            probas = model.predict_proba(X)
+            errors = np.max(np.clip(y - probas, 0, 1), axis=1)
+            # errors = [log_loss(y[i, :], probas[i, :]) for i in range(len(y))]
             self.samplewise_clf_errors[clf_name] = errors
 
     def predict_proba_one_sample(self, sample):
@@ -949,7 +1158,6 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
             pipeline_weights[pipeline_type] = weights[idx]
 
         return pipeline_weights
-
 
 
 

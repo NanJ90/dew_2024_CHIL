@@ -306,8 +306,8 @@ class MissDataset(Sequence):
 
         train_val_pairs = [
             (
-                train_set[0: int(len(train_set) * 0.8)], 
-                train_set[int(len(train_set) * 0.8):]
+                train_set[0: int(len(train_set) * 0.5)], 
+                train_set[int(len(train_set) * 0.5):]
             )
             for train_set in train_sets
         ]
@@ -657,3 +657,15 @@ class DataLoadersEnum(Enum):
             dataset_name='diabetic_retinopathy', 
             target_col=target_col
         )
+
+    def prepare_diabetes_vcu_dataset(
+        path_to_data: str = '../data/diabetes_vcu.csv'
+    ) -> CustomExperimentDataObject:
+        df = pd.read_csv(path_to_data, na_values='?')
+        target_col = 'readmitted'
+        df['readmitted'] = [0 if x == 'NO' else 1]
+        df = df.drop(columns=['patient_nbr', 'weight', 'payer_code', 'medical_specialty'])
+        categ_cols = [
+            'race', 'gender', 'admission_type_id', 'discharge_disposition_id',
+            'admission_source_id', 'diag_1', 'diag_2', 'diag_3', #...
+        ]
