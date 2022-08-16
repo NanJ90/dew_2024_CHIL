@@ -20,14 +20,15 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
 from sklearn.datasets import make_classification, make_gaussian_quantiles
-from sklearn.ensemble import RandomForestRegressor, StackingClassifier, StackingRegressor
+from sklearn.ensemble import RandomForestRegressor, StackingClassifier, StackingRegressor, VotingClassifier
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
 from sklearn.linear_model import BayesianRidge
-from sklearn.metrics import classification_report, max_error, roc_auc_score
+from sklearn.metrics import classification_report, f1_score, log_loss, max_error, roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 from sklearn.tree import DecisionTreeClassifier
 from tqdm import tqdm
 import xgboost as xgb
@@ -803,12 +804,12 @@ class CustomExperiment():
                 'Estim(' + p.estimator_name + ')_Imputer(' + p.imputer_name + ')': p
                 for p in pipelines_list
             }
-            vanilla_xgb = ClassifierWithImputation(
-                xgb.XGBClassifier(**xgb_params),
-                IdentityImputer()
-            )
-            pipelines['Estim(' + str(type(vanilla_xgb)) + ')_Imputer(Identity)'] = vanilla_xgb
-            # so we have 9 total pipelines
+            # vanilla_xgb = ClassifierWithImputation(
+            #     xgb.XGBClassifier(**xgb_params),
+            #     IdentityImputer()
+            # )
+            # pipelines['Estim(' + str(type(vanilla_xgb)) + ')_Imputer(Identity)'] = vanilla_xgb
+            # so we have [---9---] 8 total baselines
 
         else:
             pipelines = classifier_pool
@@ -822,6 +823,7 @@ class CustomExperiment():
             final_estimator=xgb.XGBClassifier(
                 **{'n_jobs': 1, 'max_depth': 3, 'n_estimators': 60, 'verbosity': 0}
             ),
+            # final_estimator=DecisionTreeClassifier(max_depth=5),
             cv='prefit',
             n_jobs=1
         )
@@ -836,8 +838,9 @@ class CustomExperiment():
         # ]
         self.clf_dew = DEWClassifier(
             classifier_pool=self.pipelines,
-            n_neighbors=3,
-            n_top_to_choose=[1,3,5,None]
+            n_neighbors=7,
+            n_top_to_choose=[1,3,None],
+            competence_threshold=0.5
         )
 
     def __init__(
@@ -883,6 +886,7 @@ class CustomExperiment():
         self.metrics[str(type(self.clf_stacked))] = []
         for top_n in self.clf_dew.n_top_to_choose:
             self.metrics['dew_top_' + str(top_n)] = []
+        self.weights_dfs = {}
         # for clf_dew in self.clf_dew_models:
         #     self.metrics[
         #         str(type(clf_dew)) + '_top_' + str(clf_dew.n_top_to_choose)
@@ -892,17 +896,29 @@ class CustomExperiment():
         # proba_predictions_df = pd.DataFrame({})
         # errors_df = pd.DataFrame({})
         pipeline.fit(X_train, y_train)
-        proba_predictions = pipeline.predict_proba(X_test)[:,1]
+        proba_predictions = pipeline.predict_proba(X_test)
+        if isinstance(proba_predictions, list):
+            proba_predictions = proba_predictions[0]
+        
         # proba_predictions_df[pipeline_name] = proba_predictions
-        errors = np.abs(proba_predictions - y_test)
+        # errors = np.abs(proba_predictions - y_test)
+        errors = np.max(np.clip(y_test - proba_predictions, 0, 1), axis=1)
+        # errors = [
+        #     log_loss(y_test[i, :], proba_predictions[i, :])
+        #     for i in range(len(y_test))
+        # ]
         # errors_df[pipeline_name] = errors
-        predictions = [1 if p > 0.5 else 0 for p in proba_predictions]
-        roc_auc = roc_auc_score(y_test, proba_predictions)
-        metrics = get_classification_metrics(predictions, y_test)
+        # predictions = (proba_predictions == proba_predictions.max(axis=1, keepdims=True)).astype(int)
+        predictions = np.argmax(proba_predictions, axis=1)
+        single_label_y_test = np.argmax(y_test, axis=1)
+        roc_auc = roc_auc_score(y_test, proba_predictions, multi_class='ovr')
+        # metrics = get_classification_metrics(predictions, single_label_y_test)
         # print(classification_report(y_test, predictions))
+        metrics = {}
         metrics['roc_auc'] = round(roc_auc, 4)
-        accuracy = 1 - (np.sum(np.logical_xor(predictions, y_test)) / len(predictions))
+        accuracy = 1 - (np.sum(np.logical_xor(predictions, single_label_y_test)) / len(predictions))
         metrics['accuracy'] = round(accuracy, 4)
+        metrics['weighted_f1_score'] = f1_score(single_label_y_test, predictions, average='weighted')
         self.metrics[pipeline_name].append(list(metrics.values()))
 
         return proba_predictions, errors
@@ -911,8 +927,32 @@ class CustomExperiment():
 
     def do_experiment_one_fold(self, X_train, y_train, X_val, y_val, X_test, y_test):
         # run baselines
-        proba_predictions_df = pd.DataFrame({})
+        self._init_pipelines()
+        proba_predictions_per_pipeline = {}
         errors_df = pd.DataFrame({})
+        label_encoder = OneHotEncoder()
+        y_train = np.array(y_train)
+        y_val = np.array(y_val)
+        y_test = np.array(y_test)
+
+        if len(y_train.shape) == 1:
+            y_train = y_train.reshape(-1,1)
+            y_train = np.array(label_encoder.fit_transform(y_train).todense())
+        elif y_train.shape[1] == 1:
+            y_train = np.array(label_encoder.fit_transform(y_train).todense())
+
+        if len(y_val.shape) == 1:
+            y_val = y_val.reshape(-1,1)
+            y_val = np.array(label_encoder.fit_transform(y_val).todense())
+        elif y_val.shape[1] == 1:
+            y_val = np.array(label_encoder.fit_transform(y_val).todense())
+        
+        if len(y_test.shape) == 1:
+            y_test = y_test.reshape(-1,1)
+            y_test = np.array(label_encoder.fit_transform(y_test).todense())
+        elif y_test.shape[1] == 1:
+            y_test = np.array(label_encoder.fit_transform(y_test).todense())
+        
 
         pipelines_start = datetime.now()
         for pipeline_type in self.pipelines:
@@ -924,23 +964,35 @@ class CustomExperiment():
                 X_train=X_train, y_train=y_train,
                 X_test=X_test, y_test=y_test
             )
-            proba_predictions_df[pipeline_type] = proba_predictions
+            proba_predictions_per_pipeline[pipeline_type] = proba_predictions
             errors_df[pipeline_type] = errors
         print('pipelines completed in ' + str(datetime.now() - pipelines_start))
 
+        baseline_test_predictions_dict = deepcopy(proba_predictions_per_pipeline)
         # run uniform model averaging over baselines
         # print('running uniform averaging')
-        proba_predictions = proba_predictions_df.mean(axis=1)
-        errors = errors_df.mean(axis=1)
-        proba_predictions_df['Uniform Model Averaging'] = proba_predictions
+        proba_predictions = np.mean(
+            np.dstack(list(proba_predictions_per_pipeline.values())),
+            axis=-1
+        )
+        # errors = errors_df.mean(axis=1)
+        errors = np.max(np.clip(y_test - proba_predictions, 0, 1), axis=1)
+        # errors = [
+        #     log_loss(y_test[i, :], proba_predictions[i, :])
+        #     for i in range(len(y_test))
+        # ]
+        proba_predictions_per_pipeline['Uniform Model Averaging'] = proba_predictions
         errors_df['Uniform Model Averaging'] = errors
-        predictions = [1 if p > 0.5 else 0 for p in proba_predictions]
-        roc_auc = roc_auc_score(y_test, proba_predictions)
-        metrics = get_classification_metrics(predictions, y_test)
+        predictions = np.argmax(proba_predictions, axis=1)
+        single_label_y_test = np.argmax(y_test, axis=1)
+        roc_auc = roc_auc_score(y_test, proba_predictions, multi_class='ovr')
+        # metrics = get_classification_metrics(predictions, y_test)
         # print(classification_report(y_test, predictions))
+        metrics = {}
         metrics['roc_auc'] = round(roc_auc, 4)
-        accuracy = 1 - (np.sum(np.logical_xor(predictions, y_test)) / len(predictions))
+        accuracy = 1 - (np.sum(np.logical_xor(predictions, single_label_y_test)) / len(predictions))
         metrics['accuracy'] = round(accuracy, 4)
+        metrics['weighted_f1_score'] = f1_score(single_label_y_test, predictions, average='weighted')
         self.metrics['Uniform Model Averaging'].append(list(metrics.values()))
         # need to store metrics names somewhere accessible; not ideal way to do this but it works
         self.metric_type_cols = list(metrics.keys())
@@ -954,31 +1006,42 @@ class CustomExperiment():
             X_train=X_val, y_train=y_val,
             X_test=X_test, y_test=y_test
         )
-        proba_predictions_df[str(type(self.clf_stacked))] = proba_predictions
+        proba_predictions_per_pipeline[str(type(self.clf_stacked))] = proba_predictions
         errors_df[str(type(self.clf_stacked))] = errors
         # print('stacked generalization complete')
         
         # run DEW classifiers
         print('running DEW models')
         dew_start = datetime.now()
+        self.clf_dew.set_baseline_test_predictions(baseline_test_predictions_dict)
 
         self.clf_dew.fit(X_val, y_val)
-        proba_predictions_sets = self.clf_dew.predict_proba(X_test)
-        proba_predictions_sets = {
-            top_n: predictions[:,1] 
-            for top_n, predictions in proba_predictions_sets.items()
-        }
+        proba_predictions_sets, weights_sets, distances = self.clf_dew.predict_proba(X_test)
+        # proba_predictions_sets = {
+        #     top_n: predictions
+        #     for top_n, predictions in proba_predictions_sets.items()
+        # }
+
+        distances_df = pd.DataFrame(distances)
         
         for top_n, proba_predictions in proba_predictions_sets.items():
-            errors = np.abs(proba_predictions - y_test)
-            # errors_df[pipeline_name] = errors
-            predictions = [1 if p > 0.5 else 0 for p in proba_predictions]
-            roc_auc = roc_auc_score(y_test, proba_predictions)
-            metrics = get_classification_metrics(predictions, y_test)
+            proba_predictions_per_pipeline['dew_top_' + str(top_n)] = proba_predictions
+            errors = np.max(np.clip(y_test - proba_predictions, 0, 1), axis=1)
+            # errors = [
+            #     log_loss(y_test[i, :], proba_predictions[i, :])
+            #     for i in range(len(y_test))
+            # ]
+            errors_df['dew_top_' + str(top_n)] = errors
+            predictions = np.argmax(proba_predictions, axis=1)
+            single_label_y_test = np.argmax(y_test, axis=1)
+            roc_auc = roc_auc_score(y_test, proba_predictions, multi_class='ovr')
+            # metrics = get_classification_metrics(predictions, y_test)
             # print(classification_report(y_test, predictions))
+            metrics = {}
             metrics['roc_auc'] = round(roc_auc, 4)
-            accuracy = 1 - (np.sum(np.logical_xor(predictions, y_test)) / len(predictions))
+            accuracy = 1 - (np.sum(np.logical_xor(predictions, single_label_y_test)) / len(predictions))
             metrics['accuracy'] = round(accuracy, 4)
+            metrics['weighted_f1_score'] = f1_score(single_label_y_test, predictions, average='weighted')
             self.metrics['dew_top_' + str(top_n)].append(list(metrics.values()))
 
         # for clf_dew in self.clf_dew_models:
@@ -995,15 +1058,19 @@ class CustomExperiment():
         #     errors_df[
         #         str(type(clf_dew)) + '_top_' + str(clf_dew.n_top_to_choose)
         #     ] = errors
+        for k in proba_predictions_per_pipeline.keys():
+            proba_predictions_per_pipeline[k] = proba_predictions_per_pipeline[k][:, 1]
         print('DEW completed in ' + str(datetime.now() - dew_start))
+        print(self.metrics)
 
-        return proba_predictions_df, errors_df
+        return errors_df, weights_sets, pd.DataFrame(proba_predictions_per_pipeline), distances_df
 
     def do_kfold_experiments(self):
         y_trues = []
-        preds_dfs = []
         errors_dfs = []
-        all_dew_weights = []
+        proba_predictions_dfs = []
+        distances_dfs = []
+        all_dew_weights = {top_n: [] for top_n in self.clf_dew.n_top_to_choose}
         for fold in range(self.dataset.n_folds):
             self._init_pipelines()
             train, val, test = self.dataset[fold]
@@ -1017,14 +1084,16 @@ class CustomExperiment():
             X_val = val.drop(self.dataset.target_col, axis=1)
             X_train = train.drop(self.dataset.target_col, axis=1)
 
-            proba_predictions_df, errors_df = self.do_experiment_one_fold(
+            errors_df, weights_sets, proba_predictions_df, distances_df = self.do_experiment_one_fold(
                 X_train=X_train, y_train=y_train,
                 X_val=X_val, y_val=y_val,
                 X_test=X_test, y_test=y_test
             )
-            preds_dfs.append(proba_predictions_df)
             errors_dfs.append(errors_df)
-            # all_dew_weights.append(weights)
+            proba_predictions_dfs.append(proba_predictions_df)
+            for top_n in weights_sets.keys():
+                all_dew_weights[top_n].append(weights_sets[top_n])
+            distances_dfs.append(distances_df)
 
         all_cols = list(self.pipelines.keys()) + [
             'Uniform Model Averaging',
@@ -1036,10 +1105,10 @@ class CustomExperiment():
         ]
 
         # print('concatenating predictions')
-        preds_df = pd.concat(preds_dfs)
+        # preds_df = pd.concat(preds_dfs)
         # preds_df.index = range(len(preds_df))
         # preds_df.columns = all_cols
-        self.proba_predictions_df_total = preds_df
+        # self.proba_predictions_df_total = preds_df
         
         # print('concatenating errors')
         errors_df_total = pd.concat(errors_dfs)
@@ -1048,6 +1117,13 @@ class CustomExperiment():
         self.errors_df_total = errors_df_total
 
         # print('concatenating weights')
+        for top_n in all_dew_weights.keys():
+            weights = np.vstack(all_dew_weights[top_n])
+            self.weights_dfs[top_n] = pd.DataFrame(weights)
+
+        self.proba_predictions_df_total = pd.concat(proba_predictions_dfs)
+        self.distances_df_total = pd.concat(distances_dfs)
+
         # weights_df = pd.concat(all_dew_weights)
         # weights_df.columns = list(self.pipelines.keys())
         # self.weights_df = weights_df
@@ -1063,7 +1139,7 @@ class CustomExperiment():
         metrics_df.index = self.metric_type_cols
         # print(metrics_df)
         print('experimental run complete.')
-        return metrics_df, self.errors_df_total
+        return metrics_df, self.errors_df_total, self.weights_dfs, self.proba_predictions_df_total, self.distances_df_total
 
 
 def run_custom_experiments(data, dataset_name, miss_param_dict, target_col):
@@ -1096,12 +1172,11 @@ def run_custom_experiments(data, dataset_name, miss_param_dict, target_col):
                 exp_type=params['missing_mechanism'],
                 name=name
             )
-            metrics_df, errors_df = experiment.run()
+            metrics_df, errors_df, weights_dfs, probas_df, distances_df = experiment.run()
 
             filename = str(i) + '.csv'
             # weights_filename = os.path.join(experiment.results_dir, 'weights_' + filename)
             errors_filename = os.path.join(experiment.results_dir, 'errors_' + filename)
-            
             # print('writing weights')
             # weights_df.to_csv(weights_filename)
             
@@ -1116,6 +1191,16 @@ def run_custom_experiments(data, dataset_name, miss_param_dict, target_col):
             metrics_filename = os.path.join(experiment.results_dir, 'metrics_' + filename)
             # print('writing metrics to csv')
             metrics_df.to_csv(metrics_filename)
+
+            probas_filename = os.path.join(experiment.results_dir, 'predictions_' + filename)
+            probas_df.to_csv(probas_filename)
+
+            for top_n in weights_dfs.keys():
+                weights_filename = os.path.join(experiment.results_dir, 'weights_top_' + str(top_n) + '_' + filename)
+                weights_dfs[top_n].to_csv(weights_filename)
+
+            distances_filename = os.path.join(experiment.results_dir, 'distances_' + filename)
+            distances_df.to_csv(distances_filename)
             print('updating progress bar after index ' + str(i))
             pbar.update(1)
     
@@ -1152,7 +1237,8 @@ CURRENT_SUPPORTED_DATALOADERS = {
 def run(custom_experiment_data_object):
     
     MCAR_PARAM_DICT = {
-        'p_miss': [x/10 for x in range(3,9)], 
+        # 'p_miss': [x/10 for x in range(3,9)], 
+        'p_miss': [0.3], 
         'missing_mechanism': ["MCAR"], 
         'opt': [None], 
         'p_obs': [None], 
@@ -1160,18 +1246,19 @@ def run(custom_experiment_data_object):
     }
 
     MAR_PARAM_DICT = {
-        'p_miss': [x/10 for x in range(3,9)], 
+        # 'p_miss': [x/10 for x in range(3,9)], 
+        'p_miss': [0.3], 
         'missing_mechanism': ["MAR"], 
         'opt': [None], 
-        'p_obs': [x/10 for x in range(3,9)], 
+        'p_obs': [0.3], 
         'q': [None],
     }
 
     MNAR_PARAM_DICT = {
-        'p_miss': [x/10 for x in range(3,9)], 
+        'p_miss': [0.3], 
         'missing_mechanism': ["MNAR"], 
         'opt': ['logistic'], 
-        'p_obs': [x/10 for x in range(3,9)], 
+        'p_obs': [0.3], 
         'q': [None],
     }
 
