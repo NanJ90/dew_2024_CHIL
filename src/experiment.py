@@ -840,7 +840,7 @@ class CustomExperiment():
             classifier_pool=self.pipelines,
             n_neighbors=7,
             n_top_to_choose=[1,3,None],
-            competence_threshold=0.7
+            competence_threshold=0.5
         )
 
     def __init__(
@@ -927,6 +927,7 @@ class CustomExperiment():
 
     def do_experiment_one_fold(self, X_train, y_train, X_val, y_val, X_test, y_test):
         # run baselines
+        self._init_pipelines()
         proba_predictions_per_pipeline = {}
         errors_df = pd.DataFrame({})
         label_encoder = OneHotEncoder()
@@ -967,6 +968,7 @@ class CustomExperiment():
             errors_df[pipeline_type] = errors
         print('pipelines completed in ' + str(datetime.now() - pipelines_start))
 
+        baseline_test_predictions_dict = deepcopy(proba_predictions_per_pipeline)
         # run uniform model averaging over baselines
         # print('running uniform averaging')
         proba_predictions = np.mean(
@@ -1011,13 +1013,16 @@ class CustomExperiment():
         # run DEW classifiers
         print('running DEW models')
         dew_start = datetime.now()
+        self.clf_dew.set_baseline_test_predictions(baseline_test_predictions_dict)
 
         self.clf_dew.fit(X_val, y_val)
-        proba_predictions_sets, weights_sets = self.clf_dew.predict_proba(X_test)
+        proba_predictions_sets, weights_sets, distances = self.clf_dew.predict_proba(X_test)
         # proba_predictions_sets = {
         #     top_n: predictions
         #     for top_n, predictions in proba_predictions_sets.items()
         # }
+
+        distances_df = pd.DataFrame(distances)
         
         for top_n, proba_predictions in proba_predictions_sets.items():
             proba_predictions_per_pipeline['dew_top_' + str(top_n)] = proba_predictions
@@ -1058,12 +1063,13 @@ class CustomExperiment():
         print('DEW completed in ' + str(datetime.now() - dew_start))
         print(self.metrics)
 
-        return errors_df, weights_sets, pd.DataFrame(proba_predictions_per_pipeline)
+        return errors_df, weights_sets, pd.DataFrame(proba_predictions_per_pipeline), distances_df
 
     def do_kfold_experiments(self):
         y_trues = []
         errors_dfs = []
         proba_predictions_dfs = []
+        distances_dfs = []
         all_dew_weights = {top_n: [] for top_n in self.clf_dew.n_top_to_choose}
         for fold in range(self.dataset.n_folds):
             self._init_pipelines()
@@ -1078,7 +1084,7 @@ class CustomExperiment():
             X_val = val.drop(self.dataset.target_col, axis=1)
             X_train = train.drop(self.dataset.target_col, axis=1)
 
-            errors_df, weights_sets, proba_predictions_df = self.do_experiment_one_fold(
+            errors_df, weights_sets, proba_predictions_df, distances_df = self.do_experiment_one_fold(
                 X_train=X_train, y_train=y_train,
                 X_val=X_val, y_val=y_val,
                 X_test=X_test, y_test=y_test
@@ -1087,6 +1093,7 @@ class CustomExperiment():
             proba_predictions_dfs.append(proba_predictions_df)
             for top_n in weights_sets.keys():
                 all_dew_weights[top_n].append(weights_sets[top_n])
+            distances_dfs.append(distances_df)
 
         all_cols = list(self.pipelines.keys()) + [
             'Uniform Model Averaging',
@@ -1115,6 +1122,7 @@ class CustomExperiment():
             self.weights_dfs[top_n] = pd.DataFrame(weights)
 
         self.proba_predictions_df_total = pd.concat(proba_predictions_dfs)
+        self.distances_df_total = pd.concat(distances_dfs)
 
         # weights_df = pd.concat(all_dew_weights)
         # weights_df.columns = list(self.pipelines.keys())
@@ -1131,7 +1139,7 @@ class CustomExperiment():
         metrics_df.index = self.metric_type_cols
         # print(metrics_df)
         print('experimental run complete.')
-        return metrics_df, self.errors_df_total, self.weights_dfs, self.proba_predictions_df_total
+        return metrics_df, self.errors_df_total, self.weights_dfs, self.proba_predictions_df_total, self.distances_df_total
 
 
 def run_custom_experiments(data, dataset_name, miss_param_dict, target_col):
@@ -1164,7 +1172,7 @@ def run_custom_experiments(data, dataset_name, miss_param_dict, target_col):
                 exp_type=params['missing_mechanism'],
                 name=name
             )
-            metrics_df, errors_df, weights_dfs, probas_df = experiment.run()
+            metrics_df, errors_df, weights_dfs, probas_df, distances_df = experiment.run()
 
             filename = str(i) + '.csv'
             # weights_filename = os.path.join(experiment.results_dir, 'weights_' + filename)
@@ -1190,6 +1198,9 @@ def run_custom_experiments(data, dataset_name, miss_param_dict, target_col):
             for top_n in weights_dfs.keys():
                 weights_filename = os.path.join(experiment.results_dir, 'weights_top_' + str(top_n) + '_' + filename)
                 weights_dfs[top_n].to_csv(weights_filename)
+
+            distances_filename = os.path.join(experiment.results_dir, 'distances_' + filename)
+            distances_df.to_csv(distances_filename)
             print('updating progress bar after index ' + str(i))
             pbar.update(1)
     
@@ -1265,6 +1276,6 @@ if __name__ == '__main__':
     # run_randomized_synthetic_clf_experiments()
     
     # get function object
-    data_preparation_function_object = CURRENT_SUPPORTED_DATALOADERS['diabetic_retinopathy']
+    data_preparation_function_object = CURRENT_SUPPORTED_DATALOADERS['eeg_eye_state']
     data_object = data_preparation_function_object() # call function
     run(data_object)

@@ -821,7 +821,8 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
                             Iterable[Tuple[str, BaseEstimator]]],
         n_neighbors=5,
         n_top_to_choose=[1,3,5,None],
-        competence_threshold = 0.5
+        competence_threshold = 0.5,
+        baseline_test_predictions_dict = None
     ) -> None:
         super().__init__()
         self.classifier_pool = dict(classifier_pool)
@@ -831,6 +832,12 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
         self.samplewise_clf_errors = pd.DataFrame({})
         self.weight_assignments = pd.DataFrame({})
         self._temp_weights = []
+        self.baseline_test_predictions_dict = baseline_test_predictions_dict
+        if self.baseline_test_predictions_dict is not None:
+            self.baseline_test_predictions = np.dstack([
+                self.baseline_test_predictions_dict[pipeline]
+                for pipeline in self.baseline_test_predictions_dict
+            ])
 
     def fit(self, X, y):
         if not isinstance(X, pd.DataFrame):
@@ -856,15 +863,15 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
         self.val_set_hard_preds_matrix = val_set_hard_preds_df.to_numpy()
 
     def predict_proba_one_sample(
-        self, sample
-    ) -> Mapping[str, Mapping[Union[int, None], Iterable[float]]]:
+        self, sample, sample_idx
+    ) -> Tuple[Mapping[str, Mapping[Union[int, None], Iterable[float]]], int]:
         predictions = {}
         diversities_per_pipeline = {}
         weights_dict = {}
         query = np.array(sample).reshape(1,-1)
-        pipeline_specific_neighbor_indices: dict = self.get_nearest_neighbors(query, self.train_samples)
+        pipeline_specific_neighbor_indices, distances = self.get_nearest_neighbors(query, self.train_samples)
         pipeline_competences: dict = self.estimate_competences(
-            pipeline_specific_neighbor_indices=pipeline_specific_neighbor_indices
+            pipeline_specific_neighbor_indices=pipeline_specific_neighbor_indices, distances=distances
         )
         full_competences = np.array(list(pipeline_competences.values())).astype(np.float32)
         full_weights = scipy.special.softmax(full_competences)
@@ -924,47 +931,69 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
                 top_n_clf = list(self.classifier_pool.items())
                 top_n_clf_competences = competences
 
+            top_n_clf_competences = [
+                competence 
+                if competence > self.competence_threshold 
+                else 0 
+                for competence in top_n_clf_competences
+            ]
 
             weights = scipy.special.softmax(top_n_clf_competences)
             weights_to_report = [0] * len(full_weights)
             for i, clf_idx in enumerate(ranked):
                 weights_to_report[clf_idx] = weights[i]
             weights_dict[top_n] = list(weights_to_report)
-            probas = np.array([
-                model.predict_proba(sample)[0]
-                for clf_name, model in top_n_clf
-            ])
-            # print(top_n_clf)
-            # print(weights)
-            # print(probas)
-            prediction = np.dot(weights, probas)
-            # print(prediction)
-            # print('=========')
+            if self.baseline_test_predictions_dict is None:
+                probas = np.array([
+                    model.predict_proba(sample)[0]
+                    for clf_name, model in top_n_clf
+                ])
+                prediction = np.dot(weights, probas)
+            else:
+                probas = self.baseline_test_predictions[sample_idx, :, :].T
+                prediction = np.dot(weights_to_report, probas)
+
             predictions[top_n] = prediction
 
-        return {'predictions': predictions, 'weights': weights_dict}
+        return (
+            {
+                'predictions': predictions, 
+                'weights': weights_dict, 
+                'nn_distances': list(distances)
+            }, 
+            sample_idx
+        )
         
 
     def predict_proba(self, X) -> Tuple[Mapping[Union[int, None], np.ndarray]]:
         top_n_prediction_sets = {}
 
-        predictions = {top_n: [] for top_n in self.n_top_to_choose}
-        weights = {top_n: [] for top_n in self.n_top_to_choose}
+        predictions = {top_n: {} for top_n in self.n_top_to_choose}
+        weights = {top_n: {} for top_n in self.n_top_to_choose}
         all_samples = [X.iloc[i, :].astype(np.float32) for i in range(X.shape[0])]
+        sample_incides = list(range(len(all_samples)))
+        nn_distances_per_sample = []
 
         with tqdm(total=len(all_samples)) as pbar:
             with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
-                for result in pool.map(self.predict_proba_one_sample, all_samples):
+                for result, idx in pool.map(self.predict_proba_one_sample, all_samples, sample_incides):
+                    nn_distances_per_sample.append(result['nn_distances'])
                     for top_n in self.n_top_to_choose:
-                        predictions[top_n].append(result['predictions'][top_n])
-                        weights[top_n].append(result['weights'][top_n])
+                        predictions[top_n][idx] = result['predictions'][top_n]
+                        weights[top_n][idx] = result['weights'][top_n]
                     pbar.update(1)
 
         for top_n in predictions.keys():
+            predictions[top_n] = dict(sorted(predictions[top_n].items(), key = lambda x: x[0]))
+            predictions[top_n] = [x[1] for x in predictions[top_n].items()]
             predictions[top_n] = np.vstack(predictions[top_n])
+            weights[top_n] = dict(sorted(weights[top_n].items(), key = lambda x: x[0]))
+            weights[top_n] = [x[1] for x in weights[top_n].items()]
             weights[top_n] = np.vstack(weights[top_n])
 
-        return predictions, weights
+            nn_distances_per_sample = np.vstack(nn_distances_per_sample)
+
+        return predictions, weights, nn_distances_per_sample
 
     def predict(self, X) -> dict:
         predictions = {}
@@ -975,6 +1004,13 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
 
         return predictions
 
+    def set_baseline_test_predictions(self, baseline_test_predictions_dict: dict):
+        self.baseline_test_predictions_dict = baseline_test_predictions_dict
+        self.baseline_test_predictions = np.dstack([
+            self.baseline_test_predictions_dict[pipeline]
+            for pipeline in self.baseline_test_predictions_dict
+        ])
+
     def get_nearest_neighbors(self, q, samples_df):
         pipeline_specific_neighbor_indices = {}
         for idx, p in self.classifier_pool.items():
@@ -984,27 +1020,36 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
             # we will use numerical indices simply for facilitating y_true indexing in competence esitmation
             dist_df = pd.DataFrame(data=distances, columns=['distance'], index=range(len(samples_df)))
             sorted_distances_df = dist_df.sort_values('distance')
+            distances = sorted_distances_df['distance'][0: self.n_neighbors]
             pipeline_specific_neighbor_indices[idx] = sorted_distances_df.index[0: self.n_neighbors]
 
-        return pipeline_specific_neighbor_indices
+        return pipeline_specific_neighbor_indices, distances
 
 
-    def estimate_competences(self, q=None, samples_df=None, pipeline_specific_neighbor_indices=None) -> dict:
+    def estimate_competences(
+        self, q=None, samples_df=None, pipeline_specific_neighbor_indices=None,
+        distances=None
+    ) -> dict:
         
+        assert not np.logical_xor(pipeline_specific_neighbor_indices is None, distances is None)
+
         pipeline_competences = {}
         if pipeline_specific_neighbor_indices is None:
             assert q is not None and samples_df is not None
-            pipeline_specific_neighbor_indices = self.get_nearest_neighbors(
+            pipeline_specific_neighbor_indices, distances = self.get_nearest_neighbors(
                 q, samples_df
             )
+
+        distance_weights = scipy.special.softmax(distances)
         
         for pipeline_idx, indices in pipeline_specific_neighbor_indices.items():
             # predictions = pipelines[pipeline_idx].predict_proba(samples_df.loc[indices, :])
             # errors = np.abs(predictions - y_true[indices])
             errors = self.samplewise_clf_errors[pipeline_idx][indices]
             competences = 1 - errors
+            # competences *= distance_weights
             competence = np.mean(competences)
-            competence = competence / (np.std(competences) + 0.01) if competence > self.competence_threshold else 0
+            # competence = competence / (np.std(competences) + 0.01) if competence > self.competence_threshold else 0
             pipeline_competences[pipeline_idx] = competence
 
         return pipeline_competences
