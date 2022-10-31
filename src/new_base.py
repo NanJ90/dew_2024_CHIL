@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore")
 import networkx as nx
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.impute._base import _BaseImputer
 from tqdm import tqdm
 
@@ -467,6 +467,64 @@ class ClassifierWithImputation(BaseEstimator, ClassifierMixin):
         proba_predictions = self.predict_proba(X)
         threshold = find_optimal_threshold(proba_predictions, y)
         self.threshold = threshold
+
+    def __sklearn_is_fitted__(self):
+        """Necessary for Stacking"""
+        return True
+
+
+class RegressorWithImputation(BaseEstimator, RegressorMixin):
+    def __init__(
+        self, 
+        estimator: BaseEstimator, 
+        imputer: _BaseImputer,
+    ) -> None:
+        if inspect.isclass(estimator):
+            self.estimator = estimator()
+        else: # instantiated estimator
+            self.estimator = estimator
+        if inspect.isclass(imputer):
+            self.imputer = imputer()
+        else:
+            self.imputer = imputer
+        self.imputer_is_fitted = False
+        self.estimator_is_fitted = False
+        self.estimator_name = str(type(self.estimator).__name__)
+        self.imputer_name = str(type(self.imputer).__name__)
+        if hasattr(self.imputer, 'estimator'):
+            self.imputer_name += '(' + str(type(self.imputer.estimator)) + ')'
+        self.name = self.estimator_name + '_imputation_' + self.imputer_name
+
+    def fit(self, X, y, use_optimal_threshold=False):
+        # impute
+        X_imputed = self.imputer.fit_transform(X=X, y=y)
+        self.imputer_is_fitted = True
+        self.estimator.fit(X_imputed, y)
+        self.estimator_is_fitted = True
+        if use_optimal_threshold:
+            self.set_optimal_threshold(X, y)
+        if isinstance(y, list):
+            self.classes = list(set(y))
+        elif isinstance(y, np.ndarray):
+            if len(y.shape) > 1:
+                self.classes = np.eye(y.shape[1])
+            else:
+                self.classes = np.unique(y)
+
+    def predict(self, X):
+        assert self.estimator_is_fitted
+        X_imputed = self.imputer.transform(X)
+        predictions = self.estimator.predict(X_imputed)
+        
+        if isinstance(predictions, list): # random forest
+            predictions = predictions[-1]
+            if not isinstance(predictions, np.ndarray):
+                raise RuntimeError('Predictions are of type {str(type(predictions))}, must be np.ndarray')
+
+        return predictions
+
+    def set_optimal_threshold(self, X, y) -> None:
+        raise RuntimeWarning('set_optimal_threshold is being called on a Regressor; this is not well-defined.')
 
     def __sklearn_is_fitted__(self):
         """Necessary for Stacking"""

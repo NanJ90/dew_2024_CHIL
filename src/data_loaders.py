@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from enum import Enum
 from itertools import product
 import sys
-from typing import Callable, Iterable, Union
+from typing import Callable, Iterable, Tuple, Union
 
 
 from imblearn.base import BaseSampler
@@ -13,8 +13,9 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 import sklearn
+from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler, OneHotEncoder
 
 
 sys.path.append('.')
@@ -239,6 +240,8 @@ class Dataset(Sequence):
         return train, val, test
 
 
+TrainValTestTriples = Iterable[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]
+
 class MissDataset(Sequence):
     def __init__(
         self,
@@ -263,6 +266,7 @@ class MissDataset(Sequence):
         self.all_columns = data.columns
         self.target_col = target_col
         self.n_folds = n_folds
+        self.cv_random_state = cv_random_state
         
         if sampling_strategy is not None:
             y = data[target_col]
@@ -295,7 +299,7 @@ class MissDataset(Sequence):
         self.data[self.target_col] = self.targets
         
         folder_ = StratifiedKFold(
-            n_splits=n_folds,
+            n_splits=self.n_folds,
             random_state=cv_random_state,
             shuffle=True
         )
@@ -327,23 +331,57 @@ class MissDataset(Sequence):
         }
         self.feature_to_test_map = self.tests
 
+    def split_dataset(self):
+        folder_ = StratifiedKFold(
+            n_splits=self.n_folds,
+            random_state=self.cv_random_state,
+            shuffle=True
+        )
+        train_test_pairs = list(folder_.split(self.data, self.targets))
+        train_sets = [train for (train, test) in train_test_pairs]
+        for t in train_sets:
+            np.random.shuffle(t)
+
+        train_val_pairs = [
+            (
+                train_set[0: int(len(train_set) * 0.5)], 
+                train_set[int(len(train_set) * 0.5):]
+            )
+            for train_set in train_sets
+        ]
+        final_train_sets = [train for (train, val) in train_val_pairs]
+        final_val_sets = [val for (train, val) in train_val_pairs]
+        final_test_sets = [test_set for (_, test_set) in train_test_pairs]
+
+        self.train_val_test_triples = list(zip(
+            final_train_sets, final_val_sets, final_test_sets
+        ))
+
+    def split_dataset_hook(self, splitting_function: Callable, *args, **kwargs) -> TrainValTestTriples:
+        self.train_val_test_triples = splitting_function(*args, **kwargs)
+
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, i):
-        train_idx, val_idx, test_idx = self.train_val_test_triples[i]
-        train, val, test = (
-            self.data.iloc[train_idx, :], 
-            self.data.iloc[val_idx, :], 
-            self.data.iloc[test_idx, :]
-        )
+        try:
+            train_idx, val_idx, test_idx = self.train_val_test_triples[i]
+            train, val, test = (
+                self.data.iloc[train_idx, :], 
+                self.data.iloc[val_idx, :], 
+                self.data.iloc[test_idx, :]
+            )
 
-        train, val, test = (
-            pd.DataFrame(train, columns=self.all_columns), 
-            pd.DataFrame(val, columns=self.all_columns),
-            pd.DataFrame(test, columns=self.all_columns)
-        )
-        return train, val, test
+            train, val, test = (
+                pd.DataFrame(train, columns=self.all_columns), 
+                pd.DataFrame(val, columns=self.all_columns),
+                pd.DataFrame(test, columns=self.all_columns)
+            )
+            return train, val, test
+        except:
+            train, val, test = self.train_val_test_triples[i]
+            print(test.head())
+            return train, val, test
 
 
 
@@ -620,6 +658,76 @@ def normality_test_wisconsin():
         print(t)
 
 
+def split_parkinsons_data(df, n_folds=5):
+    ids = list(set(df.index))
+    
+    pos_ids = list(range(1, 21))
+    num_pos_ids = len(pos_ids)
+    min_pos_id, max_pos_id = min(pos_ids), max(pos_ids)
+    neg_ids = list(range(21, 41))
+    num_neg_ids = len(neg_ids)
+    min_neg_id, max_neg_id = min(neg_ids), max(neg_ids)
+
+    np.random.shuffle(pos_ids)
+    np.random.shuffle(neg_ids)
+
+    pos_slices = [
+        (x, min(x + int(num_pos_ids/n_folds), num_pos_ids)) 
+        for x in range(0, num_pos_ids, int(num_pos_ids/n_folds))
+    ]
+    neg_slices = [
+        (x, min(x + int(num_neg_ids/n_folds), num_neg_ids)) 
+        for x in range(0, num_neg_ids, int(num_neg_ids/n_folds))
+    ]
+    pos_set_ids = [pos_ids[x:y] for x, y in pos_slices]
+    neg_set_ids = [neg_ids[x:y] for x, y in neg_slices]
+    test_set_ids = [pos_ + neg_ for pos_, neg_ in zip(pos_set_ids, neg_set_ids)]
+    print(test_set_ids)
+    test_sets = [df.loc[x,:] for x in test_set_ids]
+    train_sets = [df.drop(x.index) for x in test_sets]
+    # splits = [df[1][1] for df in [groups[x: y] for x, y in slices]]
+    # splits = [df for df in [groups[x: y] for x, y in slices]]
+    # splits = [[x[1] for x in split] for split in splits]
+    # flatten = lambda l: [item for sublist in l for item in sublist]
+    
+    # train_sets = [pd.concat(flatten([splits[idx] for idx in range(5) if idx != i ])) for i in range(5)]
+    # test_sets = [pd.concat(x) for x in splits]
+
+    train_val_test_triples = []
+    for i, t in enumerate(train_sets):
+        pos_train_df = t[t.index.isin(pos_ids)]
+        pos_train_ids = list(set(pos_train_df.index))
+        np.random.shuffle(pos_train_ids)
+        pos_train_ids, pos_val_ids = (
+            pos_train_ids[0 : int(len(pos_train_ids) / 2)], 
+            pos_train_ids[int(len(pos_train_ids) / 2) : ]
+        )
+        
+        neg_train_df = t[t.index.isin(neg_ids)]
+        neg_train_ids = list(set(neg_train_df.index))
+        np.random.shuffle(neg_train_ids)
+        neg_train_ids, neg_val_ids = (
+            neg_train_ids[0 : int(len(neg_train_ids) / 2)], 
+            neg_train_ids[int(len(neg_train_ids) / 2) : ]
+        )
+        train_set = t[t.index.isin(pos_train_ids + neg_train_ids)]
+        val_set = t[t.index.isin(pos_val_ids + neg_val_ids)]
+
+        # train_ids = list(set(t.index))[0:int(len(set(t.index))/2)]
+        # val_ids = [id_ for id_ in set(t.index) if id_ not in train_ids]
+        # train_set = t.loc[train_ids, :]
+        # val_set = t.loc[val_ids, :]
+        train_val_test_triples.append((train_set, val_set, test_sets[i]))
+        print(train_set.shape, val_set.shape, test_sets[i].shape)
+        print(list(set(train_set.index)), list(set(val_set.index)), list(set(test_sets[i].index)))
+        print(dict(train_set.targets.value_counts()), dict(val_set.targets.value_counts()), dict(test_sets[i].targets.value_counts()))
+
+    return train_val_test_triples
+
+
+
+
+
 class DataLoadersEnum(Enum):
 
     def prepare_eeg_eye_data(
@@ -669,3 +777,174 @@ class DataLoadersEnum(Enum):
             'race', 'gender', 'admission_type_id', 'discharge_disposition_id',
             'admission_source_id', 'diag_1', 'diag_2', 'diag_3', #...
         ]
+
+    # wisconsin breast cancer ___prognosis___ dataset
+    def prepare_wpbc_data(
+        path_to_data: str = '../data/wpbc.data'
+    ) -> CustomExperimentDataObject:
+        colnames = [
+            'radius', 
+            'texture',
+            'perimeter',
+            'area',
+            'smoothness',
+            'compactness',
+            'concavity',
+            'concave points',
+            'symmetry',
+            'fractaldimension'
+        ]
+        feature_types = ['mean', 'stderr', 'worst']
+        cols = [x[0] + '_' + x[1] for x in product(feature_types, colnames)]
+        cols = ['id', 'prognosis', 'time'] + cols # this way col order is correct
+        cols += ['tumorsize', 'lymphstatus']
+        
+        df = pd.read_csv(path_to_data, header=None, 
+                    names=cols, na_values='?')
+        df = df.drop(columns='id')
+        target_col = 'prognosis'
+        df[target_col] = LabelEncoder().fit_transform(df[target_col])
+
+        return CustomExperimentDataObject(
+            data=df,
+            dataset_name='wisconsin_bc_prognosis',
+            target_col=target_col
+        )
+        
+    # wisconsin breast cancer ___diagnosis___ dataset
+    def prepare_wdbc_data(
+        path_to_data: str = '../data/wdbc.data'
+    ) -> CustomExperimentDataObject:
+        colnames = [
+            'radius', 
+            'texture',
+            'perimeter',
+            'area',
+            'smoothness',
+            'compactness',
+            'concavity',
+            'concave points',
+            'symmetry',
+            'fractaldimension'
+        ]
+        feature_types = ['mean', 'stderr', 'worst']
+        cols = [x[0] + '_' + x[1] for x in product(feature_types, colnames)]
+        cols = ['id', 'diagnosis'] + cols
+        
+        df = pd.read_csv(path_to_data, header=None, 
+                    names=cols, na_values='?')
+        df = df.drop(columns='id')
+        target_col = 'diagnosis'
+        df[target_col] = LabelEncoder().fit_transform(df[target_col])
+        
+        return CustomExperimentDataObject(
+            data=df,
+            dataset_name='wisconsin_bc_diagnosis',
+            target_col=target_col
+        )
+        
+    def prepare_parkinsons_data(
+        path_to_data: str = '../data/parkinsons/train_data.txt'
+    ) -> CustomExperimentDataObject:
+        
+        df = pd.read_csv(path_to_data, header=None, index_col=0)
+        train_ids = set(df.index)
+        pos_ids = list(range(1,21))
+        neg_ids = list(range(21,41))
+        colnames = [
+            'Jitter (local)', 'Jitter (local, absolute)', 'Jitter (rap)', 
+            'Jitter (ppq5)', 'Jitter (ddp)',  'Shimmer (local)', 
+            'Shimmer (local, dB)', 'Shimmer (apq3)', 'Shimmer (apq5)', 
+            'Shimmer (apq11)', 'Shimmer (dda)', 'AC', 'NTH', 'HTN', 
+            'Median pitch', 'Mean pitch', 'Standard deviation', 'Minimum pitch',
+            'Maximum pitch',  'Number of pulses', 'Number of periods', 
+            'Mean period', 'Standard deviation of period',  
+            'Fraction of locally unvoiced frames', 'Number of voice breaks', 
+            'Degree of voice breaks', 'UPDRS', 'targets'
+        ]
+        
+        df.columns = colnames
+
+        df = df.drop(columns='UPDRS')
+        target_col = 'targets'
+        dataset_name = 'parkinsons'
+        df[target_col] = LabelEncoder().fit_transform(df[target_col])
+        return CustomExperimentDataObject(data=df, dataset_name=dataset_name, target_col=target_col)
+
+    def prepare_cervical_cancer_data(
+        path_to_data: str = '../data/risk_factors_cervical_cancer.csv',
+        target_col: str = 'Hinselmann'
+    ) -> CustomExperimentDataObject:
+        df = pd.read_csv(path_to_data, na_values='?')
+        cols_to_drop = [
+            'STDs: Time since first diagnosis',
+            'STDs: Time since last diagnosis',
+            'Dx:Cancer', 'Dx'
+        ]
+        target_cols = ['Hinselmann', 'Schiller', 'Citology', 'Biopsy']
+        df = df.drop(columns=cols_to_drop)
+        df = df.drop(columns=[c for c in target_cols if c != target_col])
+        dataset_name = 'cervical_cancer_' + target_col
+        df[target_col] = LabelEncoder().fit_transform(df[target_col])
+        y = df[target_col]
+        X = df.drop(columns=target_col)
+        X_cols = df.columns
+        rus = RandomUnderSampler(random_state=0)
+        X_sample, y_sample = rus.fit_resample(X, y)
+        df = pd.DataFrame(data=X_sample, columns=X_cols)
+        df[target_col] = y_sample
+        return CustomExperimentDataObject(data=df, dataset_name=dataset_name, target_col=target_col)
+
+    def prepare_myocardial_infarction_data(
+        path_to_data: str = '../data/MI.data'
+    ) -> CustomExperimentDataObject:
+        df = pd.read_csv(path_to_data, header=None, index_col=0, na_values='?')
+        target_idx = -1
+        target_col = 'targets'
+        df.columns = [str(c) for c in df.columns[0: df.shape[1] - 1]] + [target_col]
+        df = df.drop(columns=[str(x) for x in range(112, 123)]) # drop target-related cols
+        df[target_col] = df[target_col].map(lambda x: 0 if x == 0 else 1)
+        df[target_col] = LabelEncoder().fit_transform(df[target_col])
+        y = df[target_col]
+        X = df.drop(columns=target_col)
+        X_cols = df.columns
+        rus = RandomUnderSampler(random_state=0)
+        X_sample, y_sample = rus.fit_resample(X, y)
+        df = pd.DataFrame(data=X_sample, columns=X_cols)
+        df[target_col] = y_sample
+        return CustomExperimentDataObject(data=df, dataset_name='myocardial_infarction', target_col=target_col)
+        
+    def prepare_student_data(
+        path_to_data: str = '../data/student/student-mat.csv',
+        target_col='G3'
+    ) -> CustomExperimentDataObject:
+        if 'mat' in path_to_data.split('/')[-1]:
+            subtype = 'mat'
+        elif 'por' in path_to_data.split('/')[-1]:
+            subtype = 'por'
+        potential_targets = ['G1', 'G2', 'G3']
+        df = pd.read_csv(path_to_data, sep=';')
+        targets = np.array(df[target_col]).astype(int).squeeze()
+        # print(targets)
+        df = df.drop(columns=potential_targets)
+        categorical_cols = [
+            'school', 'sex', 'famsize', 'address', 'Pstatus', 'Medu', 'Fedu', 'Mjob', 
+            'Fjob', 'reason', 'guardian', 'schoolsup', 'famsup', 'paid', 
+            'activities', 'nursery', 'higher', 'internet', 'romantic'
+        ]
+        col_transformer = ColumnTransformer(
+            [('enc_' + str(i), LabelEncoder(), [c]) for i, c in enumerate(categorical_cols)], 
+            remainder='passthrough'
+        )
+        for c in categorical_cols:
+            df[c] = LabelEncoder().fit_transform(df[c]).astype(int)
+        #df = col_transformer.fit_transform(df)
+        #df = pd.DataFrame(df)
+        df[target_col] = targets
+        return CustomExperimentDataObject(
+            data=df, 
+            dataset_name='Student_' + subtype + '_' + target_col,
+            target_col=target_col
+        )
+
+
