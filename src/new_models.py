@@ -138,6 +138,7 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
                 for pipeline in self.baseline_test_predictions_dict
             ])
 
+
     def fit(self, X, y):
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X)
@@ -162,6 +163,10 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
             self.samplewise_clf_errors[clf_name] = errors
 
         self.val_set_hard_preds_matrix = val_set_hard_preds_df.to_numpy()
+
+        self.imputed_samples_per_pipeline = {}
+        for p in self.classifier_pool:
+        	self.imputed_samples_per_pipeline[p] = p.imputer.transform(self.train_samples)
 
     def predict_proba_one_sample(
         self, sample, sample_idx
@@ -289,7 +294,7 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
         pipeline_specific_neighbor_indices = {}
         for idx, p in self.classifier_pool.items():
             imputed_q = p.imputer.transform(q).reshape(1,-1)
-            imputed_samples = p.imputer.transform(samples_df)
+            imputed_samples = self.imputed_samples_per_pipeline[p]
             distances = cdist(imputed_q, imputed_samples)[0]
             # we will use numerical indices simply for facilitating y_true indexing in competence esitmation
             dist_df = pd.DataFrame(data=distances, columns=['distance'], index=range(len(samples_df)))
