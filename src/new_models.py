@@ -165,7 +165,7 @@ class DEWClassifier(BaseEstimator, ClassifierMixin):
         self.val_set_hard_preds_matrix = val_set_hard_preds_df.to_numpy()
 
         self.imputed_samples_per_pipeline = {}
-        for _, p in self.classifier_pool:
+        for _, p in self.classifier_pool.items():
         	self.imputed_samples_per_pipeline[p] = p.imputer.transform(self.train_samples)
 
     def predict_proba_one_sample(
