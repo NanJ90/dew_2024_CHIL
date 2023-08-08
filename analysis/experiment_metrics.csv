@@ -1,0 +1,22 @@
+,UMA AP,DEW AP,UMA AUROC,DEW AUROC,Percent Positive Class,Percent Samples: DEW Error < UMA Error
+eeg_eye_state MCAR,81.281,81.72,83.208,83.573,45.0,71.729
+eeg_eye_state MAR,88.152,88.676,89.328,89.817,45.0,81.429
+eeg_eye_state MNAR,82.007,82.389,83.763,84.11,45.0,72.804
+myocardial_infarction MCAR,84.528,84.3,83.769,83.55,50.0,62.731
+myocardial_infarction MNAR,89.564,89.51,88.667,88.64,50.0,72.14
+myocardial_infarction MAR,91.223,91.154,90.321,90.301,50.0,76.015
+diabetic_retinopathy_final MNAR,77.37,77.409,72.279,72.414,53.0,58.471
+diabetic_retinopathy_final MAR,79.192,79.2,74.285,74.24,53.0,56.56
+diabetic_retinopathy_final MCAR,77.349,77.346,72.65,72.657,53.0,57.168
+wisconsin_bc_diagnosis MCAR,98.401,98.398,98.593,98.594,37.0,77.329
+wisconsin_bc_diagnosis MAR,98.6,98.606,98.935,98.94,37.0,82.601
+wisconsin_bc_diagnosis MNAR,98.524,98.546,98.864,98.878,37.0,77.329
+wisconsin_bc_prognosis MCAR,30.759,30.852,57.7,57.602,24.0,62.626
+wisconsin_bc_prognosis MNAR,36.617,38.053,61.758,61.618,24.0,62.626
+wisconsin_bc_prognosis MAR,29.792,29.953,53.487,53.445,24.0,54.545
+diabetes_vcu MCAR,63.324,63.343,67.594,67.608,46.0,56.125
+diabetes_vcu MNAR,66.485,66.551,70.746,70.781,46.0,59.066
+diabetes_vcu MAR,66.85,66.883,71.151,71.169,46.0,56.185
+cleveland_heart_disease MAR,86.891,86.832,87.217,87.199,46.0,68.35
+cleveland_heart_disease MCAR,86.371,86.482,87.888,87.924,46.0,72.391
+cleveland_heart_disease MNAR,86.62,86.578,88.212,88.248,46.0,69.36

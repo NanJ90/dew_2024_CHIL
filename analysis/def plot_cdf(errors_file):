@@ -1,0 +1,4 @@
+def plot_cdf(errors_file):
+	errors = pd.read_csv(errors_file)
+	comparison_df = errors[[‘Uniform Model Averaging’, ‘dew_top_None’]]
+	comparison_df.diff(axis=1)['dew_top_None'].hist(cumulative=True, density=1, bins=400)
