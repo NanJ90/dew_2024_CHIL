@@ -1,5 +1,5 @@
 # Preparation- installing necessary packages:
-The required libraries and packages are stored in requirements.txt. run `pip install -r requirements.txt`
+The required libraries and packages are stored in requirements.txt. Run `pip install -r requirements.txt`
 
 # The project file structure:
 ```
