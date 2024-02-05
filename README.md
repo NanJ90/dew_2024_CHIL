@@ -1,5 +1,5 @@
 # Preparation- installing necessary packages:
-The required libraries and packages are stored in requirements.txt. run `pip install -r requirements.txt`
+The required libraries and packages are stored in requirements.txt. Run `pip install -r requirements.txt`
 
 # The project file structure:
 ```
@@ -31,4 +31,4 @@ project_root/
 1. `cd src`
 2. `python main.py`
 
-The default running dataset is eeg-eye-state, and you can choose different dataset from supproting datasets variable in `main.py`
+The default running dataset is eeg-eye-state, and you can choose different dataset a variable called `CURRENT_SUPPORTED_DATALOADERS` inside `main.py`
